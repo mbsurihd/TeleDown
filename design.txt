@@ -1,0 +1,43 @@
+
+[Program  Flow]
+1. $chat_update_time = get_last_update($chat)
+2. Check $chat.id NOT EXISTS IN %chats.id
+	B2.1T: add_chat_to_db($chat)
+3. Check $chat_update_time > %chats[$chat.id].last_update:
+	B3.1T:
+		update_message_db($chat)
+4. dir_index = index_directory
+
+[Procedures]
+update_message_db (chat):
+	FOREACH message in get_history($chat):
+		IF NOT [$message.id, $chat.id] IN [%messages.id, %messages.chat_id]:
+		   `INSERT INTO messages(id, chat_id, size, complete)
+			VALUES($message.id, $chat.id, $message.media.size, FALSE)`
+		ELSE:
+			break FOREACH
+   `UPDATE chats
+	SET
+		last_update = $chat_update_time
+	WHERE 
+		id = $chat.id`
+END update_message_db
+
+add_chat_to_db(chat):
+`INSERT INTO chats(id, last_update)
+VALUES($chat.id, $chat_update_time)`
+END add_chat_to_db
+
+get_last_update(chat):
+last_message = get_history($chat, limit = 1)
+RETURN $last_message.date
+END get_last_update
+
+[Variables]
+VAR chat: pyrogram.types.Chat :: Target chat for media download
+VART chat_update_time: datetime :: Last update for $chat
+
+[Database]
+CREATE TABLE chats(id INTEGER PRIMARY KEY, last_update DATETIME)
+CREATE TABLE messages(id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL, file TEXT, size INTEGER, complete BOOLEAN, FORIEGN KEY (chat_id) REFERENCES chats (id))
+CREATE TABLE files(file TEXT NOT NULL, size INTEGER
