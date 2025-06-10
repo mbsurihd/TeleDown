@@ -29,7 +29,7 @@ END update_message_db
 
 add_chat_to_db(chat):
    `INSERT INTO chats(id, last_update)
-	VALUES($chat.id, $chat_update_time)`
+	VALUES($chat.id, datetime(0))`
 END add_chat_to_db
 
 get_last_update(chat):
