@@ -1,3 +1,7 @@
 *.db
 .venv
 .git
+config.json
+fixed.py
+*.bak
+*.session

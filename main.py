@@ -1,159 +1,263 @@
 import sqlite3
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
+import json
+from typing import Any
 
-from pyrogram.client import Client
 from pyrogram.types import Chat, Message
+from pyrogram.client import Client
 from pyrogram.enums.chat_type import ChatType
-from pyrogram.enums.message_media_type import MessageMediaType
 
 from ProgressBar import CreateProgressBar, TimedPromptKey
 
-App: Client
-DatabaseConnection: sqlite3.Connection
-Database: sqlite3.Cursor
-LastUpdate: datetime
-CHAT: Chat
-DEST_DIR: Path
-CHAT_ID: int
+#Debug
+import pdb
 
-DB_FILE = "./TeleDown.db"
-DOWNLOAD_TYPES = [MessageMediaType.PHOTO, MessageMediaType.VIDEO, MessageMediaType.VOICE, MessageMediaType.DOCUMENT, MessageMediaType.VIDEO_NOTE, MessageMediaType.AUDIO, MessageMediaType.ANIMATION]
-
-async def last_update (chat: Chat):
-    chat_history = await App.get_chat_history(chat.id, limit = 1)
-    if chat_history != None:
-        async for message in chat_history:
-            last_message = message
-            return last_message.date
-    return datetime.fromtimestamp(0)
-
-def db_init():
-    DatabaseConnection = sqlite3.connect(DB_FILE)
-    Database = DatabaseConnection.cursor()
-    _ = Database.executescript("""
-CREATE TABLE IF NOT EXISTS chats(id INTEGER PRIMARY KEY, last_update DATETIME);
-CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL, file TEXT, size INTEGER, complete BOOLEAN, FORIEGN KEY (chat_id) REFERENCES chats(id));
-    """)
-    DatabaseConnection.commit()
-
-#Helper
-def message_media_size(message: Message):
-    if message.media == MessageMediaType.PHOTO:
-        return message.photo.file_size
-    elif message.media == MessageMediaType.VIDEO:
-        return message.video.file_size
-    elif message.media == MessageMediaType.ANIMATION:
-        return message.animation.file_size
-    elif message.media == MessageMediaType.AUDIO:
-        return message.audio.file_size
-    elif message.media == MessageMediaType.VIDEO_NOTE:
-        return message.video_note.file_size
-    elif message.media == MessageMediaType.DOCUMENT:
-        return message.document.file_size
-    elif message.media == MessageMediaType.VOICE:
-        return message.voice.file_size
-    else:
-        return 0
-
-async def update_message_db(chat: Chat):
-    chat_history = await App.get_chat_history(chat.id)
-    if chat_history != None:
-        async for message in chat_history:
-            if message.media in DOWNLOAD_TYPES:
-                res = Database.execute(f"SELECT id FROM messages WHERE id = {message.id} AND chat_id = {chat.id}")
-                if res.fetchone() is None:
-                    _ =  Database.execute(f"INSERT INTO messages(id, chat_id, size, complete) VALUES({message.id}, {chat.id}, {message_media_size(message)}, FALSE)")
-                else:
-                    break
-        _ = Database.execute(f"UPDATE chats SET last_update = '{LastUpdate.isoformat()}' WHERE id = {chat.id}")
-        DatabaseConnection.commit()
-
-def index_directory(index_root: Path):
-    _= Database.execute("DROP TABLE IF EXISTS files")
-    _ = Database.execute("CREATE TABLE IF NOT EXISTS files(file TEXT NOT NULL, size NOT NULL INTEGER)")
-
-    if not index_root.exists():
-        return None
-    for entry in index_root.iterdir():
-        if not entry.is_dir():
-            _ = Database.execute(f"INSERT INTO files(file , size) VALUES({str(entry.absolute())}, {entry.stat().st_size})")
-    DatabaseConnection.commit()
-
-def update_file_db():
-    _ = Database.execute("""
-    UPDATE messages
-    SET
-        complete = FALSE
-    WHERE id IN (
-        SELECT messages.id
-        FROM messages AS m
-        JOIN files AS f
-        ON m.file == f.file 
-        AND m.size > f.size
+#Intialization [Sync]
+def DBInit(DB_FILE: str):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    _ = cursor .executescript("""
+    CREATE TABLE IF NOT EXISTS chats(
+        id INTEGER PRIMARY KEY, 
+        last_update DATETIME
     );
-    UPDATE messages
-    SET
-        complete = TRUE
-    WHERE id IN (
-        SELECT messages.id
-        FROM messages AS m
-        JOIN files AS f
-        ON m.file == f.file 
-        AND m.size <= f.size
+    CREATE TABLE IF NOT EXISTS messages(
+        id INTEGER PRIMARY KEY, 
+        chat_id INTEGER NOT NULL, 
+        file TEXT, size INTEGER, 
+        complete BOOLEAN, 
+        FOREIGN KEY (chat_id) REFERENCES chats(id)
     );
     """)
+    conn.commit()
+    return conn
 
-#Helper
-def narrow_type[T](value: T | object, default: T) -> T:
+#Helper [Sync]
+def MessageMediaSize(MESSAGE: Message) -> int:
+    _media_type = MESSAGE.media.__str__().split('.')[1].lower()
+    return MESSAGE.__getattribute__(_media_type).file_size
+
+def IndexDirectory(IndexRoot: str, Database: sqlite3.Connection | None):
+    if Database is None:
+        Database = sqlite3.connect(":memory:")
+    _cursor = Database.cursor()
+    _ = _cursor.execute("DROP TABLE IF EXISTS files")
+    _ = _cursor.execute("""
+    CREATE TABLE IF NOT EXISTS files(
+        file TEXT NOT NULL,
+        size INTEGER NOT NULL
+    )
+    """)
+
+    _index_path = Path(IndexRoot)
+    for _e in _index_path.iterdir():
+        if not _e.is_dir():
+            _ = _cursor.execute(f"""
+            INSERT INTO files(file, size)
+            VALUES(
+                '{str(_e.absolute())}',
+                {_e.stat().st_size}
+            );
+            """)
+    Database.commit()
+    return Database
+
+def UpdateFileDB(Database: sqlite3.Connection):
+    _cursor = Database.cursor()
+    _ = _cursor.executescript(f"""
+    UPDATE messages
+    SET 
+        complete = 
+    CASE
+        WHEN files.file IS NOT NULL AND files.size = messages.size THEN 1
+        ELSE 0
+    END
+    FROM files
+    WHERE files.file = messages.file
+    ;
+
+    UPDATE messages
+    SET complete = 0
+    WHERE file NOT IN (SELECT file FROM files)
+    ;
+    """)
+    Database.commit()
+    return None
+
+def NarrowType[T](value: T | object, default: T) ->T:
     if isinstance(value, type(default)):
         return value
     else:
         return default
 
-def CreateAsyncProgressBar(Background: int, Foreground: int, Text: int):
+#Initilization [Async]
+async def GetLastUpdateTime(App: Client, CHAT: Chat):
+    async for _m in App.get_chat_history(CHAT.id, limit = 1):
+        return _m.date
+    return datetime.fromtimestamp(0)
+
+#Helpers [Async]
+async def UpdateMessageDB(Database: sqlite3.Connection, App:Client, CHAT: Chat, LASTUPDATE: datetime):
+    _cursor = Database.cursor()
+
+    async for _m in App.get_chat_history(CHAT.id):
+        if not _m.media:
+            continue
+
+        _dres = _cursor.execute(f"""
+        SELECT id
+        FROM messages
+        WHERE id = {_m.id}
+        AND chat_id = {CHAT.id}
+        """)
+
+        if not _dres.fetchone() is None:
+            break
+        else:
+            _ = _cursor.execute(f"""
+            INSERT INTO messages(
+                id,
+                chat_id,
+                size,
+                complete
+            )
+            VALUES(
+                {_m.id},
+                {CHAT.id},
+                {MessageMediaSize(_m)},
+                FALSE
+            )
+            """)
+    _ = _cursor.execute(f"""
+    UPDATE chats
+    SET
+        last_update = '{LASTUPDATE.isoformat()}'
+    WHERE id = {CHAT.id}
+    """)
+    Database.commit()
+
+def CreateAsyncProgressBar (Background: int, Foreground: int, Text: int):
     pbcb = CreateProgressBar(Background, Foreground, Text)
 
-    async def callback(current: float, total: float):
+    async def callback (current: int, total: int):
         return pbcb(current / total)
+
     return callback
 
+def LoadConfig (path: str):
+    config: dict[str, Any] = {}
+    with open(path) as f:
+        try:
+            config = json.load(f)
+        except json.JSONDecodeError:
+            return None
+    return config
 
-async def main():
-    #Initilization
-    _CHAT = await App.get_chat(CHAT_ID)
-    CHAT = narrow_type(_CHAT, Chat(id = 0, type = ChatType.CHANNEL))
-    db_init()
-    LastUpdate = await last_update(CHAT)
+CONFIG_PATH = "./config.json"
+DB_PATH = "./TeleDown.db"
 
-    res = Database.execute(f"SELECT id FROM chats WHERE id = {CHAT.id}")
-    if res.fetchone() is None:
-        _ = Database.execute(f"INSERT INTO chats(id, last_update) VALUES({CHAT.id}, '{datetime.fromtimestamp(0).isoformat()}')")
-        DatabaseConnection.commit()
-    res = Database.execute(f"SELECT last_update FROM chats WHERE id = {CHAT.id}")
-    chatdb_update = datetime.fromisoformat(res.fetchone()[0])
-    if LastUpdate > chatdb_update:
-        await update_message_db(CHAT)
-    index_directory(DEST_DIR)
-    update_file_db()
-    res = Database.execute(f"SELECT id FROM messages WHERE completed = FALSE AND chat_id = {CHAT.id}")
-    new_msgs: list[int] = [f[0] for f in res.fetchall()]
-    for msg_id in new_msgs:
-        message = narrow_type(await App.get_messages(CHAT.id, msg_id), Message(id = 0))
-        progbar = CreateAsyncProgressBar(18, 232, 251)
-        _dpath = await App.download_media(str(DEST_DIR), progress = progbar)
-        media_path: Path
-        if not _dpath is None:
-            media_path = Path(narrow_type(_dpath, ""))
-            res = Database.execute(f"SELECT size FROM messages WHERE id = {message.id} AND chat_id = {CHAT.id}")
-            size: int = res.fetchone()[0]
-            if media_path.stat().st_size >= size:
-                _ = Database.execute(f"UPDATE messages SET complete = TRUE file = {str(media_path)} WHERE id = {message.id} AND chat_id = {CHAT.id}")
-            else:
-                print(f"Downloading {str(media_path)} failed")
-        else:
-            print("Download failed")
-        if TimedPromptKey(5, 'x'):
-            break
+#Main Function
+async def DownloadMain(App: Client, Database: sqlite3.Connection, CHAT_ID: int, DLDIR: str):
+    async with App:
+        #Async Initilization
+        _chat = await App.get_chat(CHAT_ID)
+        CHAT = NarrowType(_chat, Chat(id = 0, type = ChatType.CHANNEL))
+        LASTUPDATE = await GetLastUpdateTime(App, CHAT)
+        db = Database.cursor()
 
+        #Ensure Chat exists in Database
+        _dres = db.execute(f"""
+        SELECT id
+        FROM chats
+        WHERE id = {CHAT.id}
+        """)
+        if _dres.fetchone() is None:
+            _ = db.execute(f"""
+            INSERT INTO chats(id, last_update)
+            VALUES(
+                {CHAT.id},
+                '{datetime.fromtimestamp(0).isoformat()}'
+            )
+            """)
+            Database.commit()
+        _dres = db.execute(f"""
+        SELECT last_update
+        FROM chats
+        WHERE id = {CHAT.id}
+        """)
+        db_update = datetime.fromisoformat(_dres.fetchone()[0])
+        if LASTUPDATE > db_update:
+            await UpdateMessageDB(Database, App, CHAT, LASTUPDATE)
+        Database = IndexDirectory(DLDIR, Database)
+        UpdateFileDB(Database)
+        _dres = db.execute(f"""
+        SELECT id 
+        FROM messages
+        WHERE complete = FALSE
+        AND chat_id = {CHAT.id}
+        ORDER BY size DESC
+        """)
+        new_messages: list[int] = [r[0] for r in _dres.fetchall()]
+        for message_id in new_messages:
 
+            _m = await App.get_messages(CHAT.id, message_id)
+            message = NarrowType(_m, Message(id = 0))
+
+            print(f"Starting {message.id}...")
+            progress_bar = CreateAsyncProgressBar(18, 231, 251)
+            _sp = await App.download_media(message, DLDIR, progress = progress_bar)
+
+            if _sp is None:
+                print(f"Failed to download {message.id}. Exiting...")
+                break
+            saved_path = str(_sp)
+            saved_size = Path(saved_path).stat().st_size
+
+            if saved_size < MessageMediaSize(message):
+                print(f"Failed to download {saved_path}. Exiting...")
+                break
+
+            _ = db.execute(f"""
+            UPDATE messages
+            SET
+                complete = TRUE,
+                file = '{saved_path}'
+            WHERE id = {message.id}
+            AND chat_id = {CHAT.id}
+            """)
+            Database.commit()
+            print("Press X in 5 seconds to cancel further downloads...")
+            if TimedPromptKey(5, 'x'):
+                break
+    return None
+
+#Main Initialization
+if __name__ == "__main__":
+    #Sync Initialization
+    if not Path(CONFIG_PATH).exists():
+        print(f"Configuration file [{CONFIG_PATH}] does not exist")
+        exit(-1)
+    CONFIG = LoadConfig(CONFIG_PATH)
+    if CONFIG is None:
+        print(f"Failed to load configuration from file {CONFIG_PATH}")
+        exit(-1)
+
+    CHAT_ID = int(CONFIG["CHAT_ID"])
+    if not Path(CONFIG["DLDIR"]).exists():
+        print(f"Download destination {CONFIG["DLDIR"]} does not exist")
+        exit(-1)
+    DLDIR = str(CONFIG["DLDIR"])
+
+    API_ID = str(CONFIG["ApiID"])
+    API_HASH = str(CONFIG["ApiHash"])
+
+    Database = DBInit(DB_PATH)
+
+    App = Client("TeleDown", api_id = API_ID, api_hash = API_HASH, app_version = "0.0.1b")
+
+    #Run Main
+    App.run(DownloadMain(App, Database, CHAT_ID, DLDIR))
+
+    #Cleanup
+    Database.close()
