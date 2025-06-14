@@ -5,3 +5,4 @@ config.json
 fixed.py
 *.bak
 *.session
+__pycache__

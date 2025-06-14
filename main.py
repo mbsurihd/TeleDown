@@ -158,7 +158,7 @@ CONFIG_PATH = "./config.json"
 DB_PATH = "./TeleDown.db"
 
 #Main Function
-async def DownloadMain(App: Client, Database: sqlite3.Connection, CHAT_ID: int, DLDIR: str):
+async def DownloadMain(App: Client, Database: sqlite3.Connection, CHAT_ID: int, DLDIR: str, Order: str = "id ASC"):
     async with App:
         #Async Initilization
         _chat = await App.get_chat(CHAT_ID)
@@ -196,7 +196,7 @@ async def DownloadMain(App: Client, Database: sqlite3.Connection, CHAT_ID: int, 
         FROM messages
         WHERE complete = FALSE
         AND chat_id = {CHAT.id}
-        ORDER BY size DESC
+        ORDER BY {Order}
         """)
         new_messages: list[int] = [r[0] for r in _dres.fetchall()]
         for message_id in new_messages:
@@ -249,6 +249,10 @@ if __name__ == "__main__":
         exit(-1)
     DLDIR = str(CONFIG["DLDIR"])
 
+    Order = "id ASC"
+    if CONFIG["Order"]:
+        Order = str(CONFIG["Order"])
+
     API_ID = str(CONFIG["ApiID"])
     API_HASH = str(CONFIG["ApiHash"])
 
@@ -257,7 +261,7 @@ if __name__ == "__main__":
     App = Client("TeleDown", api_id = API_ID, api_hash = API_HASH, app_version = "0.0.1b")
 
     #Run Main
-    App.run(DownloadMain(App, Database, CHAT_ID, DLDIR))
+    App.run(DownloadMain(App, Database, CHAT_ID, DLDIR, Order))
 
     #Cleanup
     Database.close()
